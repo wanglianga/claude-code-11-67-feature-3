@@ -90,6 +90,8 @@ def seed(db: Session) -> None:
          "sensitivity_level": 2, "tags": [], **default_win},
         {"field_name": "abnormal_flag", "semantic": "异常标记", "data_type": "string",
          "sensitivity_level": 1, "tags": [], **default_win},
+        {"field_name": "ref_method", "semantic": "检验参考方法（酶法/免疫法等，决定结果参考范围）",
+         "data_type": "string", "sensitivity_level": 1, "tags": [], **default_win},
     ])
     p_fu = _product(db, "P-FU", "随访记录数据产品", "随访管理平台", "每周",
                     "临床研究部", "出院后随访、生存状态与复发记录", [
@@ -285,4 +287,9 @@ def seed(db: Session) -> None:
     db.add(event); db.flush()
     reservation.access_event_id = event.id
     usage.access_event_id = event.id
+    db.flush()
+
+    # ---------------- 批次质量认证演示数据（契约规则/历史基线/五类验收场景） ----------------
+    from .seed_quality import seed_quality
+    seed_quality(db)
     db.commit()

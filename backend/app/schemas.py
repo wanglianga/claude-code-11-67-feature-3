@@ -53,3 +53,48 @@ class UsageReportIn(BaseModel):
     amount: float = 1
     idempotency_key: str
     note: str = ""
+
+
+# ---------------- 批次质量认证 ----------------
+
+class BatchRecordIn(BaseModel):
+    record_key: str
+    payload: dict  # 源记录原样提交，后端不改写
+
+
+class DataBatchIn(BaseModel):
+    product_id: int
+    center_code: str
+    partition_name: str
+    dict_version: str
+    window_from: str  # YYYY-MM-DD
+    window_to: str
+    note: str = ""
+    records: list[BatchRecordIn]
+    certify: bool = True          # 入库后立即按当前规则认证
+    trigger: str = "首次认证"
+
+
+class RuleUpsertIn(BaseModel):
+    product_id: int
+    field_name: str
+    rule_type: str  # missing/invalid/uniqueness/consistency
+    params: dict = {}
+    blocking: bool = True
+    risk_level: str = "中"  # 高/中/低
+    dict_version: str | None = None  # NULL=与版本无关的通用规则
+    note: str = ""
+
+
+class RuleAdjustIn(BaseModel):
+    """规则调整：修改参数并升规则版本，后续重认证生成新版本，旧认证保留。"""
+    params: dict | None = None
+    blocking: bool | None = None
+    risk_level: str | None = None
+    enabled: bool | None = None
+    note: str | None = None
+
+
+class RecertifyIn(BaseModel):
+    trigger: str = "规则调整"  # 批次更正/规则调整
+    note: str = ""

@@ -6,7 +6,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from .config import settings
 from .db import Base, engine
-from .routers import access, audit, auth, catalog, projects, qualifications, quota
+from .routers import access, audit, auth, catalog, projects, qualifications, quality, quota
 
 
 @asynccontextmanager
@@ -52,6 +52,7 @@ app.include_router(qualifications.router)
 app.include_router(access.router)
 app.include_router(quota.router)
 app.include_router(audit.router)
+app.include_router(quality.router)
 
 
 @app.get("/api/health", tags=["系统"])

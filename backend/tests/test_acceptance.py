@@ -38,20 +38,21 @@ def test_field_intersection(client):
     admin = login(client, "admin", "admin123")
     products, projects = _ids(client, admin)
 
-    # TRAIN（L3 上限，禁直接标识符）：剔除 patient_name(L4)，其余 7 个放行
+    # TRAIN（L3 上限，禁直接标识符）：剔除 patient_name(L4)，其余 8 个放行
     q = _qual(client, admin, projects["PRJ-A"], products["P-LAB"], "TRAIN")
     names = {f["field_name"] for f in q["field_projection"]}
     assert names == {"subject_code", "test_item", "test_result", "test_unit",
-                     "test_date", "age_at_test", "abnormal_flag"}
+                     "test_date", "age_at_test", "abnormal_flag", "ref_method"}
     # test_result 可用期止于 2026-12-31，窗口应被字段可用期裁剪
     tr = next(f for f in q["field_projection"] if f["field_name"] == "test_result")
     assert tr["window_to"] == "2026-12-31"
     assert tr["window_from"] <= tr["window_to"]
 
-    # PUBLISH（L2 上限，禁直接标识符+准标识符）：只剩 5 个低敏字段
+    # PUBLISH（L2 上限，禁直接标识符+准标识符）：只剩 6 个低敏字段
     q2 = _qual(client, admin, projects["PRJ-A"], products["P-LAB"], "PUBLISH")
     names2 = {f["field_name"] for f in q2["field_projection"]}
-    assert names2 == {"subject_code", "test_item", "test_unit", "age_at_test", "abnormal_flag"}
+    assert names2 == {"subject_code", "test_item", "test_unit", "age_at_test",
+                      "abnormal_flag", "ref_method"}
     # 资格依据完整记录伦理与用途条件
     assert q2["basis"]["ethics"][0]["approval_no"] == "EA-2025-001"
     assert q2["basis"]["effective_max_sensitivity"] == 2
@@ -84,7 +85,7 @@ def test_cross_project_and_purpose_boundary(client):
     r = _access(client, zm, projects["PRJ-A"], products["P-LAB"], "PUBLISH")
     granted = {f["field_name"] for f in r["event"]["granted_fields"]}
     assert granted == {"subject_code", "test_item", "test_unit",
-                       "age_at_test", "abnormal_flag"}
+                       "age_at_test", "abnormal_flag", "ref_method"}
     assert "test_result" not in granted  # TRAIN 才有的字段不能借并集扩大
 
     # 显式申请投影外字段 → 拒绝
@@ -323,14 +324,14 @@ def test_audit_reconstruction(client):
 
     # 当时的产品定义
     then = audit["product_then"]
-    assert then["code"] == "P-LAB" and len(then["fields"]) == 8
+    assert then["code"] == "P-LAB" and len(then["fields"]) == 9
     # 当时的资格依据
     basis = audit["qualification_basis_then"]
     assert basis["basis"]["ethics"][0]["approval_no"] == "EA-2025-001"
     assert basis["purpose_code"] == "TRAIN"
     assert {f["field_name"] for f in basis["field_projection"]} == {
         "subject_code", "test_item", "test_result", "test_unit",
-        "test_date", "age_at_test", "abnormal_flag"}
+        "test_date", "age_at_test", "abnormal_flag", "ref_method"}
     # 当时的额度变化
     trail = audit["quota_trail"]
     assert trail["usage_event"]["receipt_no"]

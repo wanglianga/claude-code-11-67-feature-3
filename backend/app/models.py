@@ -298,3 +298,174 @@ class AccessEvent(Base):
     qualification_snapshot: Mapped[dict] = mapped_column(JSONB, default=dict)  # 当时的资格依据
     quota_snapshot: Mapped[dict] = mapped_column(JSONB, default=dict)          # 当时的额度变化
     created_at: Mapped[datetime] = mapped_column(sa.DateTime, default=datetime.utcnow)
+
+
+# ============================ 数据产品批次质量认证 ============================
+# 设计要点：
+# - 批次清单固定中心、产品分区、字段字典版本与统计时间窗；源记录原样落库，认证只读不改写。
+# - 质量规则（硬性数据契约）带版本；分布基线按（产品×分区×字段×字典版本）维护，
+#   字典版本不同不拼接计算漂移。
+# - 批次更正或规则调整生成新的认证版本，旧认证完整保留；目录引用明确的批次与规则版本。
+
+class DataBatch(Base):
+    """数据产品批次：一次到数批次的固定清单（中心/分区/字典版本/统计时间窗）。"""
+
+    __tablename__ = "data_batches"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    batch_no: Mapped[str] = mapped_column(sa.String(40), unique=True, index=True)
+    product_id: Mapped[int] = mapped_column(sa.ForeignKey("data_products.id"), index=True)
+    center_code: Mapped[str] = mapped_column(sa.String(32))          # 固定中心
+    partition_name: Mapped[str] = mapped_column(sa.String(64))       # 产品分区
+    dict_version: Mapped[str] = mapped_column(sa.String(32), index=True)  # 字段字典/代码表版本
+    window_from: Mapped[date] = mapped_column(sa.Date)               # 统计时间窗起
+    window_to: Mapped[date] = mapped_column(sa.Date)                 # 统计时间窗止
+    status: Mapped[str] = mapped_column(sa.String(16), default="待认证")  # 待认证/已认证/已更正
+    note: Mapped[str] = mapped_column(sa.String(256), default="")
+    created_by: Mapped[str] = mapped_column(sa.String(64), default="system")
+    created_at: Mapped[datetime] = mapped_column(sa.DateTime, default=datetime.utcnow)
+
+    records: Mapped[list["BatchRecord"]] = relationship(
+        back_populates="batch", cascade="all, delete-orphan", order_by="BatchRecord.id")
+    certifications: Mapped[list["QualityCertification"]] = relationship(
+        back_populates="batch", order_by="QualityCertification.version.desc()")
+    product: Mapped[DataProduct] = relationship()
+
+
+class BatchRecord(Base):
+    """批次源记录：原样留存（payload 不做任何改写），证据样本可回溯到记录主键。
+
+    系统不提供更新/删除端点；批次更正通过新建批次实现，旧记录与旧认证保留。
+    """
+
+    __tablename__ = "batch_records"
+    __table_args__ = (sa.UniqueConstraint("batch_id", "record_key"),)
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    batch_id: Mapped[int] = mapped_column(sa.ForeignKey("data_batches.id"), index=True)
+    record_key: Mapped[str] = mapped_column(sa.String(64))  # 源系统记录主键（如检查编号）
+    payload: Mapped[dict] = mapped_column(JSONB, default=dict)  # 源记录原样 JSON
+    created_at: Mapped[datetime] = mapped_column(sa.DateTime, default=datetime.utcnow)
+
+    batch: Mapped[DataBatch] = relationship(back_populates="records")
+
+
+class QualityRule(Base):
+    """硬性数据契约规则：按（产品 × 字段）维护，调整规则即升规则版本，旧认证快照不受影响。
+
+    rule_type：
+      missing     缺失率上限（required=true 时该字段不允许缺失）
+      invalid     非法值：值域 enum / 数值范围 / 日期格式与区间
+      uniqueness  唯一性：非空记录重复率上限
+      consistency 跨字段一致性：成对出现（pair_present）、参考方法与结果范围相容（ref_range）
+    params 示例：
+      {"required": true, "max_missing_rate": 0.0}
+      {"enum": ["CT", "MR", "DR"]} / {"min": 0, "max": 120} / {"date_format": true}
+      {"unique": true, "max_duplicate_rate": 0.0}
+      {"pair_field": "image_abstract", "max_pair_break_rate": 0.01}
+      {"ref_method_field": "ref_method", "ranges": {"酶法": [0, 40], "免疫法": [0, 60]}}
+    """
+
+    __tablename__ = "quality_rules"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    product_id: Mapped[int] = mapped_column(sa.ForeignKey("data_products.id"), index=True)
+    field_name: Mapped[str] = mapped_column(sa.String(64), index=True)
+    # 规则适用的字段字典版本；NULL 表示与版本无关的通用规则。
+    # 字典版本升级的批次只套用同版本/通用规则，避免旧值域误判新代码。
+    dict_version: Mapped[str | None] = mapped_column(sa.String(32), nullable=True, index=True)
+    rule_type: Mapped[str] = mapped_column(sa.String(16))
+    params: Mapped[dict] = mapped_column(JSONB, default=dict)
+    blocking: Mapped[bool] = mapped_column(sa.Boolean, default=True)  # 阻断型规则 vs 观察型
+    risk_level: Mapped[str] = mapped_column(sa.String(8), default="中")  # 字段风险：高/中/低
+    rule_version: Mapped[int] = mapped_column(sa.Integer, default=1)
+    enabled: Mapped[bool] = mapped_column(sa.Boolean, default=True)
+    note: Mapped[str] = mapped_column(sa.String(256), default="")
+    updated_by: Mapped[str] = mapped_column(sa.String(64), default="system")
+    updated_at: Mapped[datetime] = mapped_column(sa.DateTime, default=datetime.utcnow)
+
+
+class DistributionBaseline(Base):
+    """历史合格批次建立的分布基线：按（产品×分区×字段×字典版本）隔离。
+
+    字典版本变化时另建基线行，绝不把新旧值域拼接计算漂移。
+    stats：分类字段存类目频次分布；数值字段存均值/标准差/分位数/直方图；
+           另存成对字段的联合出现比例。
+    seasonal_stats：按季节（春/夏/秋/冬）的历史分布，用于识别"合法季节漂移"。
+    """
+
+    __tablename__ = "distribution_baselines"
+    __table_args__ = (
+        sa.UniqueConstraint("product_id", "partition_name", "field_name", "dict_version"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    product_id: Mapped[int] = mapped_column(sa.ForeignKey("data_products.id"), index=True)
+    partition_name: Mapped[str] = mapped_column(sa.String(64), index=True)
+    field_name: Mapped[str] = mapped_column(sa.String(64), index=True)
+    dict_version: Mapped[str] = mapped_column(sa.String(32))
+    sample_size: Mapped[int] = mapped_column(sa.Integer, default=0)
+    stats: Mapped[dict] = mapped_column(JSONB, default=dict)
+    seasonal_stats: Mapped[dict] = mapped_column(JSONB, default=dict)
+    source_batch_ids: Mapped[list] = mapped_column(JSONB, default=list)  # 基线依据的历史批次
+    min_stable_sample: Mapped[int] = mapped_column(sa.Integer, default=30)  # 稳定基线最小样本
+    rebuilt_at: Mapped[datetime] = mapped_column(sa.DateTime, default=datetime.utcnow)
+
+
+class QualityCertification(Base):
+    """批次质量认证版本：同一批次每次（重）认证新增一行，旧版本永不覆盖。"""
+
+    __tablename__ = "quality_certifications"
+    __table_args__ = (
+        sa.UniqueConstraint("batch_id", "version"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    batch_id: Mapped[int] = mapped_column(sa.ForeignKey("data_batches.id"), index=True)
+    version: Mapped[int] = mapped_column(sa.Integer, default=1)
+    rule_version: Mapped[int] = mapped_column(sa.Integer)             # 本次认证引用的规则版本
+    # 认证结论：通过 / 有条件通过 / 不通过 / 证据不足
+    decision: Mapped[str] = mapped_column(sa.String(16))
+    pass_rate: Mapped[float] = mapped_column(sa.Float, default=0.0)   # 字段级通过比例
+    field_count: Mapped[int] = mapped_column(sa.Integer, default=0)
+    passed_fields: Mapped[int] = mapped_column(sa.Integer, default=0)
+    blocked_fields: Mapped[int] = mapped_column(sa.Integer, default=0)
+    insufficient_fields: Mapped[int] = mapped_column(sa.Integer, default=0)
+    # 该批可供的研究目的与限制（由字段适用等级汇总）
+    research_fitness: Mapped[dict] = mapped_column(JSONB, default=dict)
+    summary: Mapped[str] = mapped_column(sa.Text, default="")
+    trigger: Mapped[str] = mapped_column(sa.String(32), default="首次认证")  # 首次认证/批次更正/规则调整
+    created_by: Mapped[str] = mapped_column(sa.String(64), default="system")
+    created_at: Mapped[datetime] = mapped_column(sa.DateTime, default=datetime.utcnow)
+
+    batch: Mapped[DataBatch] = relationship(back_populates="certifications")
+    field_results: Mapped[list["FieldQualityResult"]] = relationship(
+        back_populates="certification", cascade="all, delete-orphan",
+        order_by="FieldQualityResult.id")
+
+
+class FieldQualityResult(Base):
+    """字段（×分区）质量结果：逐项规则指标、漂移结论、适用等级、阻断原因与证据样本。"""
+
+    __tablename__ = "field_quality_results"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    certification_id: Mapped[int] = mapped_column(
+        sa.ForeignKey("quality_certifications.id"), index=True)
+    field_name: Mapped[str] = mapped_column(sa.String(64), index=True)
+    partition_name: Mapped[str] = mapped_column(sa.String(64))
+    dict_version: Mapped[str] = mapped_column(sa.String(32))
+    sample_size: Mapped[int] = mapped_column(sa.Integer, default=0)
+    # 适用等级：A 可用于确认性研究 / B 仅限探索性研究 / C 不可用于研究 / I 证据不足
+    fitness_grade: Mapped[str] = mapped_column(sa.String(2))
+    contract_passed: Mapped[bool] = mapped_column(sa.Boolean, default=True)
+    drift_status: Mapped[str] = mapped_column(sa.String(16), default="未评估")  # 无漂移/漂移/证据不足/版本不可比
+    metrics: Mapped[dict] = mapped_column(JSONB, default=dict)        # 各规则计算指标
+    drift_detail: Mapped[dict] = mapped_column(JSONB, default=dict)   # 漂移度量与基线依据
+    block_reasons: Mapped[list] = mapped_column(JSONB, default=list)  # 阻断原因（逐条规则/漂移）
+    # 证据样本：问题记录主键与样例（可回溯 batch_records 源记录）
+    evidence_samples: Mapped[list] = mapped_column(JSONB, default=list)
+    rule_refs: Mapped[list] = mapped_column(JSONB, default=list)      # 引用的契约规则 id 与版本
+    created_at: Mapped[datetime] = mapped_column(sa.DateTime, default=datetime.utcnow)
+
+    certification: Mapped[QualityCertification] = relationship(back_populates="field_results")

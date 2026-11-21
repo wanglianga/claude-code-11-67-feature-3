@@ -1,7 +1,8 @@
 """ORM → 字典序列化（接口出参统一在此组装）。"""
 from .models import (
-    AccessEvent, DataProduct, EthicsApproval, ProductField, Project,
-    ProjectMember, ProjectPurpose, QualificationBatch, QualificationInstance,
+    AccessEvent, DataBatch, DataProduct, DistributionBaseline, EthicsApproval,
+    FieldQualityResult, ProductField, Project, ProjectMember, ProjectPurpose,
+    QualificationBatch, QualificationInstance, QualityCertification, QualityRule,
     QuotaAccount, QuotaReservation, UsageEvent, UsageReport, User,
 )
 
@@ -165,4 +166,88 @@ def access_event_dict(e: AccessEvent, detail: bool = False) -> dict:
         d["product_snapshot"] = e.product_snapshot
         d["qualification_snapshot"] = e.qualification_snapshot
         d["quota_snapshot"] = e.quota_snapshot
+    return d
+
+
+# ---------------- 批次质量认证 ----------------
+
+def data_batch_dict(b: DataBatch, with_counts: bool = False) -> dict:
+    d = {
+        "id": b.id, "batch_no": b.batch_no, "product_id": b.product_id,
+        "product_code": b.product.code if b.product else None,
+        "product_name": b.product.name if b.product else None,
+        "center_code": b.center_code, "partition_name": b.partition_name,
+        "dict_version": b.dict_version,
+        "window_from": b.window_from.isoformat(),
+        "window_to": b.window_to.isoformat(),
+        "status": b.status, "note": b.note,
+        "created_by": b.created_by, "created_at": b.created_at.isoformat(),
+    }
+    if with_counts:
+        latest = b.certifications[0] if b.certifications else None
+        d["record_count"] = len(b.records)
+        d["latest_decision"] = latest.decision if latest else None
+        d["latest_version"] = latest.version if latest else None
+        d["latest_pass_rate"] = latest.pass_rate if latest else None
+        d["cert_versions"] = [
+            {"id": c.id, "version": c.version, "decision": c.decision,
+             "rule_version": c.rule_version, "trigger": c.trigger,
+             "created_at": c.created_at.isoformat()}
+            for c in b.certifications
+        ]
+    return d
+
+
+def rule_dict(r: QualityRule) -> dict:
+    return {
+        "id": r.id, "product_id": r.product_id, "field_name": r.field_name,
+        "dict_version": r.dict_version, "rule_type": r.rule_type, "params": r.params,
+        "blocking": r.blocking, "risk_level": r.risk_level,
+        "rule_version": r.rule_version, "enabled": r.enabled, "note": r.note,
+        "updated_by": r.updated_by, "updated_at": r.updated_at.isoformat(),
+    }
+
+
+def baseline_dict(bl: DistributionBaseline) -> dict:
+    return {
+        "id": bl.id, "product_id": bl.product_id, "partition_name": bl.partition_name,
+        "field_name": bl.field_name, "dict_version": bl.dict_version,
+        "sample_size": bl.sample_size, "stats_kind": bl.stats.get("kind"),
+        "stats": bl.stats, "seasonal_stats": bl.seasonal_stats,
+        "source_batch_ids": bl.source_batch_ids,
+        "min_stable_sample": bl.min_stable_sample,
+        "rebuilt_at": bl.rebuilt_at.isoformat(),
+    }
+
+
+def field_result_dict(r: FieldQualityResult, with_evidence=False) -> dict:
+    d = {
+        "id": r.id, "certification_id": r.certification_id,
+        "field_name": r.field_name, "partition_name": r.partition_name,
+        "dict_version": r.dict_version, "sample_size": r.sample_size,
+        "fitness_grade": r.fitness_grade, "contract_passed": r.contract_passed,
+        "drift_status": r.drift_status, "metrics": r.metrics,
+        "drift_detail": r.drift_detail, "block_reasons": r.block_reasons,
+        "rule_refs": r.rule_refs,
+    }
+    if with_evidence:
+        d["evidence_samples"] = r.evidence_samples
+    return d
+
+
+def certification_dict(c: QualityCertification, detail=False) -> dict:
+    d = {
+        "id": c.id, "batch_id": c.batch_id, "version": c.version,
+        "rule_version": c.rule_version, "decision": c.decision,
+        "pass_rate": c.pass_rate, "field_count": c.field_count,
+        "passed_fields": c.passed_fields, "blocked_fields": c.blocked_fields,
+        "insufficient_fields": c.insufficient_fields,
+        "research_fitness": c.research_fitness, "summary": c.summary,
+        "trigger": c.trigger, "created_by": c.created_by,
+        "created_at": c.created_at.isoformat(),
+    }
+    if detail:
+        d["batch"] = data_batch_dict(c.batch)
+        d["field_results"] = [field_result_dict(r, with_evidence=True)
+                              for r in c.field_results]
     return d
